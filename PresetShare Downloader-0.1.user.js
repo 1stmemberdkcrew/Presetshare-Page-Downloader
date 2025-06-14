@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         PresetShare Downloader
+// @name         PresetShare Downloader (Faster Version)
 // @namespace    http://tampermonkey.net/
-// @version      0.1
-// @description  Download presets from PresetShare.com
+// @version      0.2
+// @description  Fast concurrent download of free presets from PresetShare.com
 // @author       You
 // @match        https://presetshare.com/*
 // @grant        GM_xmlhttpRequest
@@ -10,223 +10,177 @@
 // @grant        GM_notification
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    // Configuration
-    const DOWNLOAD_FOLDER = 'C:\\Users\\pgorh\\Documents\\Vital';
+    const CONCURRENCY_LIMIT = 5;
     let isDownloading = false;
     let shouldCancel = false;
-    let downloadButton = null;
-    let cancelButton = null;
+    let downloadButton, cancelButton;
 
-    // Create floating buttons
     function createButtons() {
-        // Create download button
         downloadButton = document.createElement('button');
-        downloadButton.innerHTML = 'Download All Free Presets';
+        downloadButton.textContent = 'Download All Free Presets';
         downloadButton.style.cssText = `
             position: fixed;
             bottom: 20px;
             right: 20px;
-            z-index: 10000;
             padding: 10px 20px;
             background-color: #4CAF50;
             color: white;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            font-size: 14px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-            margin-right: 10px;
+            z-index: 9999;
         `;
+        downloadButton.onclick = startDownload;
 
-        downloadButton.addEventListener('mouseover', () => {
-            downloadButton.style.backgroundColor = '#45a049';
-        });
-
-        downloadButton.addEventListener('mouseout', () => {
-            downloadButton.style.backgroundColor = '#4CAF50';
-        });
-
-        downloadButton.addEventListener('click', startDownload);
-
-        // Create cancel button (initially hidden)
         cancelButton = document.createElement('button');
-        cancelButton.innerHTML = 'Cancel Downloads';
+        cancelButton.textContent = 'Cancel Downloads';
         cancelButton.style.cssText = `
             position: fixed;
             bottom: 20px;
             right: 20px;
-            z-index: 10000;
             padding: 10px 20px;
             background-color: #f44336;
             color: white;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            font-size: 14px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 9999;
             display: none;
         `;
+        cancelButton.onclick = () => {
+            shouldCancel = true;
+            GM_notification({ text: 'Cancelling downloads...', title: 'PresetShare', timeout: 2000 });
+        };
 
-        cancelButton.addEventListener('mouseover', () => {
-            cancelButton.style.backgroundColor = '#da190b';
-        });
-
-        cancelButton.addEventListener('mouseout', () => {
-            cancelButton.style.backgroundColor = '#f44336';
-        });
-
-        cancelButton.addEventListener('click', cancelDownloads);
-
-        // Add buttons to document
         document.body.appendChild(downloadButton);
         document.body.appendChild(cancelButton);
     }
 
-    // Show/hide buttons based on download state
-    function updateButtonVisibility() {
-        if (isDownloading) {
-            downloadButton.style.display = 'none';
-            cancelButton.style.display = 'block';
-        } else {
-            downloadButton.style.display = 'block';
-            cancelButton.style.display = 'none';
-        }
+    function updateButtons() {
+        downloadButton.style.display = isDownloading ? 'none' : 'block';
+        cancelButton.style.display = isDownloading ? 'block' : 'none';
     }
 
-    // Cancel downloads
-    function cancelDownloads() {
-        shouldCancel = true;
-        GM_notification({
-            text: 'Cancelling downloads...',
-            title: 'PresetShare Downloader',
-            timeout: 2000
-        });
-    }
-
-    // Get all free download buttons
     function getFreeDownloadButtons() {
         return Array.from(document.querySelectorAll('a.download-button:not(.for-subs)'));
     }
 
-    // Download a single preset
     function downloadPreset(button) {
         const presetId = button.getAttribute('data-preset-id');
         const authorName = button.getAttribute('data-author-name');
         const downloadUrl = `https://presetshare.com/download/index?id=${presetId}`;
 
         return new Promise((resolve, reject) => {
-            // Create a temporary link element
-            const link = document.createElement('a');
-            link.href = downloadUrl;
-            link.download = `${authorName}_preset_${presetId}.vital`;
-            link.style.display = 'none';
+            GM_xmlhttpRequest({
+                method: 'HEAD',
+                url: downloadUrl,
+                onload: (response) => {
+                    let extension = '.vital';
+                    const type = response.responseHeaders.match(/content-type: ([^;\r\n]+)/i)?.[1]?.toLowerCase();
 
-            // Add it to the document
-            document.body.appendChild(link);
+                    if (type?.includes('zip')) {
+                        extension = '.zip';
+                    } else if (type?.includes('octet-stream')) {
+                        const disposition = response.responseHeaders.match(/filename="?([^"]+)"?/i);
+                        if (disposition) {
+                            const ext = disposition[1].split('.').pop().toLowerCase();
+                            if (['zip', 'vital', 'fxp', 'fxb'].includes(ext)) extension = `.${ext}`;
+                        }
+                    }
 
-            // Trigger the download
-            try {
-                link.click();
-                // Remove the link after a short delay
-                setTimeout(() => {
-                    document.body.removeChild(link);
-                    resolve();
-                }, 1000);
-            } catch (error) {
-                document.body.removeChild(link);
-                console.error(`Download failed for preset ${presetId}:`, error);
-                reject(error);
-            }
+                    const link = document.createElement('a');
+                    link.href = downloadUrl;
+                    link.download = `${authorName}_preset_${presetId}${extension}`;
+                    link.style.display = 'none';
+                    document.body.appendChild(link);
+
+                    try {
+                        link.click();
+                        setTimeout(() => {
+                            document.body.removeChild(link);
+                            resolve();
+                        }, 500);
+                    } catch (e) {
+                        document.body.removeChild(link);
+                        reject(e);
+                    }
+                },
+                onerror: reject,
+            });
         });
     }
 
-    // Start the download process
-    async function startDownload() {
-        if (isDownloading) {
-            GM_notification({
-                text: 'Download already in progress!',
-                title: 'PresetShare Downloader',
-                timeout: 3000
-            });
-            return;
-        }
-
-        isDownloading = true;
-        shouldCancel = false;
-        updateButtonVisibility();
-
-        const buttons = getFreeDownloadButtons();
-
-        if (buttons.length === 0) {
-            GM_notification({
-                text: 'No free presets found on this page!',
-                title: 'PresetShare Downloader',
-                timeout: 3000
-            });
-            isDownloading = false;
-            updateButtonVisibility();
-            return;
-        }
-
-        console.log(`Found ${buttons.length} free presets to download`);
-        GM_notification({
-            text: `Starting download of ${buttons.length} presets...`,
-            title: 'PresetShare Downloader',
-            timeout: 3000
-        });
-
+    async function runConcurrentDownloads(buttons) {
         let successCount = 0;
         let failCount = 0;
         let failedPresets = [];
 
-        for (const button of buttons) {
-            if (shouldCancel) {
-                console.log('Downloads cancelled by user');
-                break;
-            }
+        let index = 0;
 
-            try {
-                await downloadPreset(button);
-                // Wait 1 second between downloads
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                successCount++;
-            } catch (error) {
-                console.error('Download failed:', error);
-                failCount++;
-                const presetId = button.getAttribute('data-preset-id');
-                const authorName = button.getAttribute('data-author-name');
-                failedPresets.push(`${authorName} (ID: ${presetId})`);
-            }
+        async function nextBatch() {
+            if (shouldCancel || index >= buttons.length) return;
+
+            const batch = buttons.slice(index, index + CONCURRENCY_LIMIT);
+            index += CONCURRENCY_LIMIT;
+
+            const results = await Promise.allSettled(batch.map(downloadPreset));
+
+            results.forEach((result, i) => {
+                const btn = batch[i];
+                const id = btn.getAttribute('data-preset-id');
+                const author = btn.getAttribute('data-author-name');
+
+                if (result.status === 'fulfilled') {
+                    successCount++;
+                } else {
+                    failCount++;
+                    failedPresets.push(`${author} (ID: ${id})`);
+                }
+            });
+
+            await nextBatch();
         }
 
-        // Show detailed notification about failures
-        let notificationText = shouldCancel
-            ? `Downloads cancelled! Successfully downloaded: ${successCount}, Failed: ${failCount}`
-            : `Download complete! Success: ${successCount}, Failed: ${failCount}`;
-
-        if (failedPresets.length > 0) {
-            notificationText += `\nFailed presets: ${failedPresets.join(', ')}`;
-        }
+        await nextBatch();
 
         GM_notification({
-            text: notificationText,
             title: 'PresetShare Downloader',
+            text: shouldCancel
+                ? `Cancelled: ${successCount} success, ${failCount} failed`
+                : `Complete! ${successCount} success, ${failCount} failed${failedPresets.length ? `\nFailed: ${failedPresets.join(', ')}` : ''}`,
             timeout: 8000
         });
-
-        isDownloading = false;
-        updateButtonVisibility();
     }
 
-    // Initialize the script
+    async function startDownload() {
+        if (isDownloading) return;
+
+        isDownloading = true;
+        shouldCancel = false;
+        updateButtons();
+
+        const buttons = getFreeDownloadButtons();
+        if (buttons.length === 0) {
+            GM_notification({ title: 'PresetShare Downloader', text: 'No free presets found!', timeout: 3000 });
+            isDownloading = false;
+            updateButtons();
+            return;
+        }
+
+        GM_notification({ title: 'PresetShare Downloader', text: `Downloading ${buttons.length} presets...`, timeout: 3000 });
+        await runConcurrentDownloads(buttons);
+
+        isDownloading = false;
+        updateButtons();
+    }
+
     function init() {
         createButtons();
     }
 
-    // Run when the page is fully loaded
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
